@@ -27,12 +27,13 @@ import (
 	"github.com/asciimoo/wuzz/config"
 	"github.com/asciimoo/wuzz/formatter"
 
+	"github.com/alessio/shellescape"
 	"github.com/jroimartin/gocui"
 	"github.com/mattn/go-runewidth"
 	"github.com/nsf/termbox-go"
 )
 
-const VERSION = "0.3.0"
+const VERSION = "0.4.0"
 
 const TIMEOUT_DURATION = 5 // in seconds
 const WINDOWS_OS = "windows"
@@ -51,28 +52,32 @@ const (
 	RESPONSE_HEADERS_VIEW = "response-headers"
 	RESPONSE_BODY_VIEW    = "response-body"
 
-	SEARCH_PROMPT_VIEW        = "prompt"
-	POPUP_VIEW                = "popup_view"
-	AUTOCOMPLETE_VIEW         = "autocomplete_view"
-	ERROR_VIEW                = "error_view"
-	HISTORY_VIEW              = "history"
-	SAVE_DIALOG_VIEW          = "save-dialog"
-	SAVE_RESPONSE_DIALOG_VIEW = "save-response-dialog"
-	SAVE_REQUEST_DIALOG_VIEW  = "save-request-dialog"
-	SAVE_RESULT_VIEW          = "save-result"
-	METHOD_LIST_VIEW          = "method-list"
-	HELP_VIEW                 = "help"
+	SEARCH_PROMPT_VIEW              = "prompt"
+	POPUP_VIEW                      = "popup_view"
+	AUTOCOMPLETE_VIEW               = "autocomplete_view"
+	ERROR_VIEW                      = "error_view"
+	HISTORY_VIEW                    = "history"
+	SAVE_DIALOG_VIEW                = "save-dialog"
+	SAVE_RESPONSE_DIALOG_VIEW       = "save-response-dialog"
+	LOAD_REQUEST_DIALOG_VIEW        = "load-request-dialog"
+	SAVE_REQUEST_FORMAT_DIALOG_VIEW = "save-request-format-dialog"
+	SAVE_REQUEST_DIALOG_VIEW        = "save-request-dialog"
+	SAVE_RESULT_VIEW                = "save-result"
+	METHOD_LIST_VIEW                = "method-list"
+	HELP_VIEW                       = "help"
 )
 
 var VIEW_TITLES = map[string]string{
-	POPUP_VIEW:                "Info",
-	ERROR_VIEW:                "Error",
-	HISTORY_VIEW:              "History",
-	SAVE_RESPONSE_DIALOG_VIEW: "Save Response (enter to submit, ctrl+q to cancel)",
-	SAVE_REQUEST_DIALOG_VIEW:  "Save Request (enter to submit, ctrl+q to cancel)",
-	SAVE_RESULT_VIEW:          "Save Result (press enter to close)",
-	METHOD_LIST_VIEW:          "Methods",
-	HELP_VIEW:                 "Help",
+	POPUP_VIEW:                      "Info",
+	ERROR_VIEW:                      "Error",
+	HISTORY_VIEW:                    "History",
+	SAVE_RESPONSE_DIALOG_VIEW:       "Save Response (enter to submit, ctrl+q to cancel)",
+	LOAD_REQUEST_DIALOG_VIEW:        "Load Request (enter to submit, ctrl+q to cancel)",
+	SAVE_REQUEST_DIALOG_VIEW:        "Save Request (enter to submit, ctrl+q to cancel)",
+	SAVE_REQUEST_FORMAT_DIALOG_VIEW: "Choose export format",
+	SAVE_RESULT_VIEW:                "Save Result (press enter to close)",
+	METHOD_LIST_VIEW:                "Methods",
+	HELP_VIEW:                       "Help",
 }
 
 type position struct {
@@ -266,7 +271,23 @@ var METHODS = []string{
 	http.MethodHead,
 }
 
+var EXPORT_FORMATS = []struct {
+	name   string
+	export func(r Request) []byte
+}{
+	{
+		name:   "JSON",
+		export: exportJSON,
+	},
+	{
+		name:   "curl",
+		export: exportCurl,
+	},
+}
+
 const DEFAULT_METHOD = http.MethodGet
+
+var DEFAULT_FORMATTER = &formatter.TextFormatter{}
 
 var CLIENT = &http.Client{
 	Timeout: time.Duration(TIMEOUT_DURATION * time.Second),
@@ -310,6 +331,7 @@ type Request struct {
 	RawResponseBody []byte
 	ContentType     string
 	Duration        time.Duration
+	Formatter       formatter.ResponseFormatter
 }
 
 type App struct {
@@ -466,7 +488,7 @@ func (e *AutocompleteEditor) Edit(v *gocui.View, key gocui.Key, ch rune, mod goc
 
 func (e *SearchEditor) Edit(v *gocui.View, key gocui.Key, ch rune, mod gocui.Modifier) {
 	e.wuzzEditor.Edit(v, key, ch, mod)
-	e.wuzzEditor.g.Execute(func(g *gocui.Gui) error {
+	e.wuzzEditor.g.Update(func(g *gocui.Gui) error {
 		e.wuzzEditor.app.PrintBody(g)
 		return nil
 	})
@@ -591,10 +613,7 @@ func (a *App) Layout(g *gocui.Gui) error {
 			setViewProperties(v, name)
 		}
 	}
-	sv, _ := g.View(STATUSLINE_VIEW)
-	sv.BgColor = gocui.ColorDefault | gocui.AttrReverse
-	sv.FgColor = gocui.ColorDefault | gocui.AttrReverse
-	a.statusLine.Update(sv, a)
+	refreshStatusLine(a, g)
 
 	return nil
 }
@@ -693,6 +712,19 @@ func showAutocomplete(completions []string, left, top, maxWidth, maxHeight int, 
 	}
 }
 
+func writeSortedHeaders(output io.Writer, h http.Header) {
+	hkeys := make([]string, 0, len(h))
+	for hname := range h {
+		hkeys = append(hkeys, hname)
+	}
+
+	sort.Strings(hkeys)
+
+	for _, hname := range hkeys {
+		fmt.Fprintf(output, "\x1b[0;33m%v:\x1b[0;0m %v\n", hname, strings.Join(h[hname], ","))
+	}
+}
+
 func (a *App) SubmitRequest(g *gocui.Gui, _ *gocui.View) error {
 	vrb, _ := g.View(RESPONSE_BODY_VIEW)
 	vrb.Clear()
@@ -708,7 +740,7 @@ func (a *App) SubmitRequest(g *gocui.Gui, _ *gocui.View) error {
 		r.Url = getViewValue(g, URL_VIEW)
 		u, err := url.Parse(r.Url)
 		if err != nil {
-			g.Execute(func(g *gocui.Gui) error {
+			g.Update(func(g *gocui.Gui) error {
 				vrb, _ := g.View(RESPONSE_BODY_VIEW)
 				fmt.Fprintf(vrb, "URL parse error: %v", err)
 				return nil
@@ -718,7 +750,7 @@ func (a *App) SubmitRequest(g *gocui.Gui, _ *gocui.View) error {
 
 		q, err := url.ParseQuery(strings.Replace(getViewValue(g, URL_PARAMS_VIEW), "\n", "&", -1))
 		if err != nil {
-			g.Execute(func(g *gocui.Gui) error {
+			g.Update(func(g *gocui.Gui) error {
 				vrb, _ := g.View(RESPONSE_BODY_VIEW)
 				fmt.Fprintf(vrb, "Invalid GET parameters: %v", err)
 				return nil
@@ -727,7 +759,9 @@ func (a *App) SubmitRequest(g *gocui.Gui, _ *gocui.View) error {
 		}
 		originalQuery := u.Query()
 		for k, v := range q {
-			originalQuery.Add(k, strings.Join(v, ""))
+			for _, qp := range v {
+				originalQuery.Add(k, qp)
+			}
 		}
 		u.RawQuery = originalQuery.Encode()
 		r.GetParams = u.RawQuery
@@ -743,7 +777,7 @@ func (a *App) SubmitRequest(g *gocui.Gui, _ *gocui.View) error {
 			if header != "" {
 				header_parts := strings.SplitN(header, ": ", 2)
 				if len(header_parts) != 2 {
-					g.Execute(func(g *gocui.Gui) error {
+					g.Update(func(g *gocui.Gui) error {
 						vrb, _ := g.View(RESPONSE_BODY_VIEW)
 						fmt.Fprintf(vrb, "Invalid header: %v", header)
 						return nil
@@ -777,7 +811,7 @@ func (a *App) SubmitRequest(g *gocui.Gui, _ *gocui.View) error {
 						if len([]rune(postValues[i])) > 0 && postValues[i][0] == '@' {
 							file, err := os.Open(postValues[i][1:])
 							if err != nil {
-								g.Execute(func(g *gocui.Gui) error {
+								g.Update(func(g *gocui.Gui) error {
 									vrb, _ := g.View(RESPONSE_BODY_VIEW)
 									fmt.Fprintf(vrb, "Error: %v", err)
 									return nil
@@ -810,7 +844,7 @@ func (a *App) SubmitRequest(g *gocui.Gui, _ *gocui.View) error {
 		// create request
 		req, err := http.NewRequest(r.Method, u.String(), body)
 		if err != nil {
-			g.Execute(func(g *gocui.Gui) error {
+			g.Update(func(g *gocui.Gui) error {
 				vrb, _ := g.View(RESPONSE_BODY_VIEW)
 				fmt.Fprintf(vrb, "Request error: %v", err)
 				return nil
@@ -829,7 +863,7 @@ func (a *App) SubmitRequest(g *gocui.Gui, _ *gocui.View) error {
 		response, err := CLIENT.Do(req)
 		r.Duration = time.Since(start)
 		if err != nil {
-			g.Execute(func(g *gocui.Gui) error {
+			g.Update(func(g *gocui.Gui) error {
 				vrb, _ := g.View(RESPONSE_BODY_VIEW)
 				fmt.Fprintf(vrb, "Response error: %v", err)
 				return nil
@@ -846,7 +880,7 @@ func (a *App) SubmitRequest(g *gocui.Gui, _ *gocui.View) error {
 				defer reader.Close()
 				response.Body = reader
 			} else {
-				g.Execute(func(g *gocui.Gui) error {
+				g.Update(func(g *gocui.Gui) error {
 					vrb, _ := g.View(RESPONSE_BODY_VIEW)
 					fmt.Fprintf(vrb, "Cannot uncompress response: %v", err)
 					return nil
@@ -860,40 +894,45 @@ func (a *App) SubmitRequest(g *gocui.Gui, _ *gocui.View) error {
 			r.RawResponseBody = bodyBytes
 		}
 
+		r.Formatter = formatter.New(a.config, r.ContentType)
+
 		// add to history
 		a.history = append(a.history, r)
 		a.historyIndex = len(a.history) - 1
 
 		// render response
-		g.Execute(func(g *gocui.Gui) error {
+		g.Update(func(g *gocui.Gui) error {
 			vrh, _ := g.View(RESPONSE_HEADERS_VIEW)
 
 			a.PrintBody(g)
 
-			// print status code and sorted headers
-			hkeys := make([]string, 0, len(response.Header))
-			for hname := range response.Header {
-				hkeys = append(hkeys, hname)
-			}
-			sort.Strings(hkeys)
+			// print status code
 			status_color := 32
 			if response.StatusCode != 200 {
 				status_color = 31
 			}
-			header_str := fmt.Sprintf(
+			header := &strings.Builder{}
+			fmt.Fprintf(
+				header,
 				"\x1b[0;%dmHTTP/1.1 %v %v\x1b[0;0m\n",
 				status_color,
 				response.StatusCode,
 				http.StatusText(response.StatusCode),
 			)
-			for _, hname := range hkeys {
-				header_str += fmt.Sprintf("\x1b[0;33m%v:\x1b[0;0m %v\n", hname, strings.Join(response.Header[hname], ","))
-			}
-			fmt.Fprint(vrh, header_str)
+
+			writeSortedHeaders(header, response.Header)
+
+			// According to the Go documentation, the Trailer maps trailer
+			// keys to values in the same format as Header
+			writeSortedHeaders(header, response.Trailer)
+
+			r.ResponseHeaders = header.String()
+
+			fmt.Fprint(vrh, r.ResponseHeaders)
 			if _, err := vrh.Line(0); err != nil {
 				vrh.SetOrigin(0, 0)
 			}
-			r.ResponseHeaders = header_str
+
 			return nil
 		})
 		return nil
@@ -903,7 +942,7 @@ func (a *App) SubmitRequest(g *gocui.Gui, _ *gocui.View) error {
 }
 
 func (a *App) PrintBody(g *gocui.Gui) {
-	g.Execute(func(g *gocui.Gui) error {
+	g.Update(func(g *gocui.Gui) error {
 		if len(a.history) == 0 {
 			return nil
 		}
@@ -914,7 +953,9 @@ func (a *App) PrintBody(g *gocui.Gui) {
 		vrb, _ := g.View(RESPONSE_BODY_VIEW)
 		vrb.Clear()
 
-		responseFormatter := formatter.New(a.config, req.ContentType)
+		var responseFormatter formatter.ResponseFormatter
+		responseFormatter = req.Formatter
+
 		vrb.Title = VIEW_PROPERTIES[vrb.Name()].title + " " + responseFormatter.Title()
 
 		search_text := getViewValue(g, "search")
@@ -929,13 +970,15 @@ func (a *App) PrintBody(g *gocui.Gui) {
 			}
 			return nil
 		}
+		if !a.config.General.ContextSpecificSearch {
+			responseFormatter = DEFAULT_FORMATTER
+		}
 		vrb.SetOrigin(0, 0)
-		search_re, err := regexp.Compile(search_text)
+		results, err := responseFormatter.Search(search_text, req.RawResponseBody)
 		if err != nil {
-			fmt.Fprint(vrb, "Error: invalid search regexp")
+			fmt.Fprint(vrb, "Search error: ", err)
 			return nil
 		}
-		results := search_re.FindAll(req.RawResponseBody, 1000)
 		if len(results) == 0 {
 			vrb.Title = "No results"
 			fmt.Fprint(vrb, "Error: no results")
@@ -1053,6 +1096,12 @@ func (a *App) SetKeys(g *gocui.Gui) error {
 		return nil
 	})
 
+	g.SetKeybinding(ALL_VIEWS, gocui.KeyF12, gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
+		a.config.General.FollowRedirects = !a.config.General.FollowRedirects
+		refreshStatusLine(a, g)
+		return nil
+	})
+
 	g.SetKeybinding(REQUEST_METHOD_VIEW, gocui.KeyEnter, gocui.ModNone, a.ToggleMethodList)
 
 	cursDown := func(g *gocui.Gui, v *gocui.View) error {
@@ -1110,6 +1159,8 @@ func (a *App) SetKeys(g *gocui.Gui) error {
 		a.closePopup(g, METHOD_LIST_VIEW)
 		return nil
 	})
+	g.SetKeybinding(SAVE_REQUEST_FORMAT_DIALOG_VIEW, gocui.KeyArrowDown, gocui.ModNone, cursDown)
+	g.SetKeybinding(SAVE_REQUEST_FORMAT_DIALOG_VIEW, gocui.KeyArrowUp, gocui.ModNone, cursUp)
 
 	g.SetKeybinding(SAVE_DIALOG_VIEW, gocui.KeyCtrlQ, gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
 		a.closePopup(g, SAVE_DIALOG_VIEW)
@@ -1160,6 +1211,67 @@ func (a *App) CreatePopupView(name string, width, height int, g *gocui.Gui) (v *
 	return
 }
 
+func (a *App) LoadRequest(g *gocui.Gui, loadLocation string) (err error) {
+	requestJson, ioErr := ioutil.ReadFile(loadLocation)
+	if ioErr != nil {
+		g.Update(func(g *gocui.Gui) error {
+			vrb, _ := g.View(RESPONSE_BODY_VIEW)
+			vrb.Clear()
+			fmt.Fprintf(vrb, "File reading error: %v", ioErr)
+			return nil
+		})
+		return nil
+	}
+
+	var requestMap map[string]string
+	jsonErr := json.Unmarshal(requestJson, &requestMap)
+	if jsonErr != nil {
+		g.Update(func(g *gocui.Gui) error {
+			vrb, _ := g.View(RESPONSE_BODY_VIEW)
+			vrb.Clear()
+			fmt.Fprintf(vrb, "JSON decoding error: %v", jsonErr)
+			return nil
+		})
+		return nil
+	}
+
+	var v *gocui.View
+	url, exists := requestMap[URL_VIEW]
+	if exists {
+		v, _ = g.View(URL_VIEW)
+		setViewTextAndCursor(v, url)
+	}
+
+	method, exists := requestMap[REQUEST_METHOD_VIEW]
+	if exists {
+		v, _ = g.View(REQUEST_METHOD_VIEW)
+		setViewTextAndCursor(v, method)
+	}
+
+	params, exists := requestMap[URL_PARAMS_VIEW]
+	if exists {
+		v, _ = g.View(URL_PARAMS_VIEW)
+		setViewTextAndCursor(v, params)
+	}
+
+	data, exists := requestMap[REQUEST_DATA_VIEW]
+	if exists {
+		g.Update(func(g *gocui.Gui) error {
+			v, _ = g.View(REQUEST_DATA_VIEW)
+			v.Clear()
+			fmt.Fprintf(v, "%v", data)
+			return nil
+		})
+	}
+
+	headers, exists := requestMap[REQUEST_HEADERS_VIEW]
+	if exists {
+		v, _ = g.View(REQUEST_HEADERS_VIEW)
+		setViewTextAndCursor(v, headers)
+	}
+	return nil
+}
+
 func (a *App) ToggleHistory(g *gocui.Gui, _ *gocui.View) (err error) {
 	// Destroy if present
 	if a.currentPopup == HISTORY_VIEW {
@@ -1194,6 +1306,68 @@ func (a *App) ToggleHistory(g *gocui.Gui, _ *gocui.View) (err error) {
 	g.SetViewOnTop(HISTORY_VIEW)
 	g.SetCurrentView(HISTORY_VIEW)
 	history.SetCursor(0, a.historyIndex)
+	return
+}
+
+func (a *App) SaveRequest(g *gocui.Gui, _ *gocui.View) (err error) {
+	// Destroy if present
+	if a.currentPopup == SAVE_REQUEST_FORMAT_DIALOG_VIEW {
+		a.closePopup(g, SAVE_REQUEST_FORMAT_DIALOG_VIEW)
+		return
+	}
+	// Create the view listing the possible formats
+	popup, err := a.CreatePopupView(SAVE_REQUEST_FORMAT_DIALOG_VIEW, 30, len(EXPORT_FORMATS), g)
+	if err != nil {
+		return err
+	}
+
+	popup.Title = VIEW_TITLES[SAVE_REQUEST_FORMAT_DIALOG_VIEW]
+
+	// Populate the popup witht the available formats
+	for _, r := range EXPORT_FORMATS {
+		fmt.Fprintln(popup, r.name)
+	}
+
+	g.SetViewOnTop(SAVE_REQUEST_FORMAT_DIALOG_VIEW)
+	g.SetCurrentView(SAVE_REQUEST_FORMAT_DIALOG_VIEW)
+	popup.SetCursor(0, 0)
+
+	// Bind the enter key, when the format is chosen, save the choice and open
+	// the save popup
+	g.SetKeybinding(SAVE_REQUEST_FORMAT_DIALOG_VIEW, gocui.KeyEnter, gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
+		// Save the format index
+		_, format := v.Cursor()
+		// Open the Save popup
+		return a.OpenSaveDialog(VIEW_TITLES[SAVE_REQUEST_DIALOG_VIEW], g,
+			func(g *gocui.Gui, _ *gocui.View) error {
+				defer a.closePopup(g, SAVE_DIALOG_VIEW)
+				saveLocation := getViewValue(g, SAVE_DIALOG_VIEW)
+
+				r := Request{
+					Url:       getViewValue(g, URL_VIEW),
+					Method:    getViewValue(g, REQUEST_METHOD_VIEW),
+					GetParams: getViewValue(g, URL_PARAMS_VIEW),
+					Data:      getViewValue(g, REQUEST_DATA_VIEW),
+					Headers:   getViewValue(g, REQUEST_HEADERS_VIEW),
+				}
+
+				// Export the request using the chosent format
+				request := EXPORT_FORMATS[format].export(r)
+
+				// Write the file
+				ioerr := ioutil.WriteFile(saveLocation, []byte(request), 0644)
+
+				saveResult := fmt.Sprintf("Request saved successfully in %s", EXPORT_FORMATS[format].name)
+				if ioerr != nil {
+					saveResult = "Error saving request: " + ioerr.Error()
+				}
+				viewErr := a.OpenSaveResultView(saveResult, g)
+
+				return viewErr
+			},
+		)
+	})
+
 	return
 }
 
@@ -1350,6 +1524,7 @@ func (a *App) ParseArgs(g *gocui.Gui, args []string) error {
 	arg_index := 1
 	args_len := len(args)
 	accept_types := make([]string, 0, 8)
+	var body_data []string
 	for arg_index < args_len {
 		arg := args[arg_index]
 		switch arg {
@@ -1360,7 +1535,7 @@ func (a *App) ParseArgs(g *gocui.Gui, args []string) error {
 			arg_index += 1
 			header := args[arg_index]
 			fmt.Fprintf(vheader, "%v\n", header)
-		case "-d", "--data", "--data-binary":
+		case "-d", "--data", "--data-binary", "--data-urlencode":
 			if arg_index == args_len-1 {
 				return errors.New("No POST/PUT/PATCH value specified")
 			}
@@ -1368,14 +1543,19 @@ func (a *App) ParseArgs(g *gocui.Gui, args []string) error {
 			arg_index += 1
 			set_data = true
 			set_binary_data = arg == "--data-binary"
+			arg_data := args[arg_index]
 
-			data := args[arg_index]
 			if !set_binary_data {
-				data, _ = url.QueryUnescape(data)
 				content_type = "form"
 			}
-			vdata, _ := g.View(REQUEST_DATA_VIEW)
-			setViewTextAndCursor(vdata, data)
+
+			if arg == "--data-urlencode" {
+				// TODO: Replace with `url.PathEscape(..)` in Go 1.8
+				arg_data_url := &url.URL{Path: arg_data}
+				arg_data = arg_data_url.String()
+			}
+
+			body_data = append(body_data, arg_data)
 		case "-j", "--json":
 			if arg_index == args_len-1 {
 				return errors.New("No POST/PUT/PATCH value specified")
@@ -1496,50 +1676,12 @@ func (a *App) ParseArgs(g *gocui.Gui, args []string) error {
 				return errors.New("-f or --file requires a file path be provided as an argument")
 			}
 			arg_index += 1
-			requestJson, ioErr := ioutil.ReadFile(args[arg_index])
-			if ioErr != nil {
-				return ioErr
-			}
-			var requestMap map[string]string
-			jsonErr := json.Unmarshal(requestJson, &requestMap)
-			if jsonErr != nil {
-				return jsonErr
-			}
-
-			var v *gocui.View
-			url, exists := requestMap[URL_VIEW]
-			if exists {
-				v, _ = g.View(URL_VIEW)
-				setViewTextAndCursor(v, url)
-			}
-
-			method, exists := requestMap[REQUEST_METHOD_VIEW]
-			if exists {
-				v, _ = g.View(REQUEST_METHOD_VIEW)
-				setViewTextAndCursor(v, method)
-			}
-
-			params, exists := requestMap[URL_PARAMS_VIEW]
-			if exists {
-				v, _ = g.View(URL_PARAMS_VIEW)
-				setViewTextAndCursor(v, params)
-			}
-
-			data, exists := requestMap[REQUEST_DATA_VIEW]
-			if exists {
-				v, _ = g.View(REQUEST_DATA_VIEW)
-				setViewTextAndCursor(v, data)
-			}
-
-			headers, exists := requestMap[REQUEST_HEADERS_VIEW]
-			if exists {
-				v, _ = g.View(REQUEST_HEADERS_VIEW)
-				setViewTextAndCursor(v, headers)
-			}
+			loadLocation := args[arg_index]
+			a.LoadRequest(g, loadLocation)
 		default:
 			u := args[arg_index]
 			if strings.Index(u, "http://") != 0 && strings.Index(u, "https://") != 0 {
-				u = "http://" + u
+				u = fmt.Sprintf("%v://%v", a.config.General.DefaultURLScheme, u)
 			}
 			parsed_url, err := url.Parse(u)
 			if err != nil || parsed_url.Host == "" {
@@ -1551,7 +1693,9 @@ func (a *App) ParseArgs(g *gocui.Gui, args []string) error {
 			vurl, _ := g.View(URL_VIEW)
 			vurl.Clear()
 			for k, v := range parsed_url.Query() {
-				fmt.Fprintf(vget, "%v=%v\n", k, strings.Join(v, ""))
+				for _, vv := range v {
+					fmt.Fprintf(vget, "%v=%v\n", k, vv)
+				}
 			}
 			parsed_url.RawQuery = ""
 			setViewTextAndCursor(vurl, parsed_url.String())
@@ -1571,6 +1715,14 @@ func (a *App) ParseArgs(g *gocui.Gui, args []string) error {
 	if len(accept_types) > 0 && !a.hasHeader(g, "Accept") {
 		fmt.Fprintf(vheader, "Accept: %v\n", strings.Join(accept_types, ","))
 	}
+
+	var merged_body_data string
+	if set_data && !set_binary_data {
+		merged_body_data = strings.Join(body_data, "&")
+	}
+
+	vdata, _ := g.View(REQUEST_DATA_VIEW)
+	setViewTextAndCursor(vdata, merged_body_data)
 
 	return nil
 }
@@ -1600,11 +1752,19 @@ func (a *App) InitConfig() {
 		MinVersion:         a.config.General.TLSVersionMin,
 		MaxVersion:         a.config.General.TLSVersionMax,
 	}
-	if !a.config.General.FollowRedirects {
-		CLIENT.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
-			return http.ErrUseLastResponse
+	CLIENT.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
+		if a.config.General.FollowRedirects {
+			return nil
 		}
+		return http.ErrUseLastResponse
 	}
+}
+
+func refreshStatusLine(a *App, g *gocui.Gui) {
+	sv, _ := g.View(STATUSLINE_VIEW)
+	sv.BgColor = gocui.ColorDefault | gocui.AttrReverse
+	sv.FgColor = gocui.ColorDefault | gocui.AttrReverse
+	a.statusLine.Update(sv, a)
 }
 
 func initApp(a *App, g *gocui.Gui) {
@@ -1642,6 +1802,7 @@ Usage: wuzz [-H|--header HEADER]... [-d|--data|--data-binary DATA] [-X|--request
 Other command line options:
   -c, --config PATH        Specify custom configuration file
   -e, --editor EDITOR      Specify external editor command
+  -f, --file REQUEST       Load a previous request
   -F, --form DATA          Add multipart form request data and set related request headers
                            If the value starts with @ it will be handled as a file path for upload
   -h, --help               Show this
@@ -1661,6 +1822,8 @@ Other command line options:
 Key bindings:
   ctrl+r              Send request
   ctrl+s              Save response
+  ctrl+e              Save request
+  ctrl+f              Load request
   tab, ctrl+j         Next window
   shift+tab, ctrl+k   Previous window
   alt+h               Show history
@@ -1748,4 +1911,34 @@ func main() {
 	if err := g.MainLoop(); err != nil && err != gocui.ErrQuit {
 		log.Panicln(err)
 	}
+}
+
+func exportJSON(r Request) []byte {
+	requestMap := map[string]string{
+		URL_VIEW:             r.Url,
+		REQUEST_METHOD_VIEW:  r.Method,
+		URL_PARAMS_VIEW:      r.GetParams,
+		REQUEST_DATA_VIEW:    r.Data,
+		REQUEST_HEADERS_VIEW: r.Headers,
+	}
+
+	request, err := json.Marshal(requestMap)
+	if err != nil {
+		return []byte{}
+	}
+	return request
+}
+
+func exportCurl(r Request) []byte {
+	var headers, params string
+	for _, header := range strings.Split(r.Headers, "\n") {
+		if header == "" {
+			continue
+		}
+		headers = fmt.Sprintf("%s -H %s", headers, shellescape.Quote(header))
+	}
+	if r.GetParams != "" {
+		params = fmt.Sprintf("?%s", r.GetParams)
+	}
+	return []byte(fmt.Sprintf("curl %s -X %s -d %s %s\n", headers, r.Method, shellescape.Quote(r.Data), shellescape.Quote(r.Url+params)))
 }

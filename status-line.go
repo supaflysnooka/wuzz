@@ -39,12 +39,29 @@ func (s *StatusLineFunctions) RequestNumber() string {
 	return strconv.Itoa(i)
 }
 
+func (s *StatusLineFunctions) SearchType() string {
+	if len(s.app.history) > 0 && !s.app.history[s.app.historyIndex].Formatter.Searchable() {
+		return "none"
+	}
+	if s.app.config.General.ContextSpecificSearch {
+		return "response specific"
+	}
+	return "regex"
+}
+
 func (s *StatusLine) Update(v *gocui.View, a *App) {
 	v.Clear()
 	err := s.tpl.Execute(v, &StatusLineFunctions{app: a})
 	if err != nil {
 		fmt.Fprintf(v, "StatusLine update error: %v", err)
 	}
+}
+
+func (s *StatusLineFunctions) DisableRedirect() string {
+	if s.app.config.General.FollowRedirects {
+		return ""
+	}
+	return "Actived"
 }
 
 func NewStatusLine(format string) (*StatusLine, error) {

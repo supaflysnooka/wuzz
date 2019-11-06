@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"os"
@@ -46,39 +45,18 @@ var COMMANDS map[string]func(string, *App) CommandFunc = map[string]func(string,
 				})
 		}
 	},
-	"saveRequest": func(_ string, a *App) CommandFunc {
+	"loadRequest": func(_ string, a *App) CommandFunc {
 		return func(g *gocui.Gui, _ *gocui.View) error {
-			return a.OpenSaveDialog(VIEW_TITLES[SAVE_REQUEST_DIALOG_VIEW], g,
+			return a.OpenSaveDialog(VIEW_TITLES[LOAD_REQUEST_DIALOG_VIEW], g,
 				func(g *gocui.Gui, _ *gocui.View) error {
 					defer a.closePopup(g, SAVE_DIALOG_VIEW)
-					saveLocation := getViewValue(g, SAVE_DIALOG_VIEW)
-
-					var requestMap map[string]string
-					requestMap = make(map[string]string)
-					requestMap[URL_VIEW] = getViewValue(g, URL_VIEW)
-					requestMap[REQUEST_METHOD_VIEW] = getViewValue(g, REQUEST_METHOD_VIEW)
-					requestMap[URL_PARAMS_VIEW] = getViewValue(g, URL_PARAMS_VIEW)
-					requestMap[REQUEST_DATA_VIEW] = getViewValue(g, REQUEST_DATA_VIEW)
-					requestMap[REQUEST_HEADERS_VIEW] = getViewValue(g, REQUEST_HEADERS_VIEW)
-
-					requestJson, err := json.Marshal(requestMap)
-					if err != nil {
-						return err
-					}
-
-					ioerr := ioutil.WriteFile(saveLocation, []byte(requestJson), 0644)
-
-					var saveResult string
-					if ioerr == nil {
-						saveResult = "Request saved successfully."
-					} else {
-						saveResult = "Error saving request: " + err.Error()
-					}
-					viewErr := a.OpenSaveResultView(saveResult, g)
-
-					return viewErr
+					loadLocation := getViewValue(g, SAVE_DIALOG_VIEW)
+					return a.LoadRequest(g, loadLocation)
 				})
 		}
+	},
+	"saveRequest": func(_ string, a *App) CommandFunc {
+		return a.SaveRequest
 	},
 	"history": func(_ string, a *App) CommandFunc {
 		return a.ToggleHistory
@@ -119,7 +97,21 @@ var COMMANDS map[string]func(string, *App) CommandFunc = map[string]func(string,
 		return func(g *gocui.Gui, v *gocui.View) error {
 			return openEditor(g, v, a.config.General.Editor)
 		}
-
+	},
+	"toggleContextSpecificSearch": func(_ string, a *App) CommandFunc {
+		return func(g *gocui.Gui, _ *gocui.View) error {
+			a.config.General.ContextSpecificSearch = !a.config.General.ContextSpecificSearch
+			a.PrintBody(g)
+			return nil
+		}
+	},
+	"clearHistory": func(_ string, a *App) CommandFunc {
+		return func(g *gocui.Gui, _ *gocui.View) error {
+			a.history = make([]*Request, 0, 31)
+			a.historyIndex = 0
+			a.Layout(g)
+			return nil
+		}
 	},
 }
 
@@ -245,7 +237,7 @@ func openEditor(g *gocui.Gui, v *gocui.View, editor string) error {
 	err = cmd.Run()
 	// sync termbox to reset console settings
 	// this is required because the external editor can modify the console
-	defer g.Execute(func(_ *gocui.Gui) error {
+	defer g.Update(func(_ *gocui.Gui) error {
 		termbox.Sync()
 		return nil
 	})

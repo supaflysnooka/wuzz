@@ -1,6 +1,6 @@
 # wuzz
 
-Interactive cli tool for HTTP inspection
+Interactive cli tool for HTTP inspection.
 
 Wuzz command line arguments are similar to cURL's arguments,
 so it can be used to inspect/modify requests copied from the
@@ -15,6 +15,10 @@ browser's network inspector with the "copy as cURL" feature.
 $ go get github.com/asciimoo/wuzz
 $ "$GOPATH/bin/wuzz" --help
 ```
+
+Note: golang >= 1.10 required.
+
+[Binary releases](https://github.com/asciimoo/wuzz/releases) are also available.
 
 
 ### Configuration
@@ -35,9 +39,12 @@ Keybinding                              | Description
 <kbd>Ctrl+R</kbd>                       | Send request
 <kbd>Ret</kbd>                          | Send request (only from URL view)
 <kbd>Ctrl+S</kbd>                       | Save response
+<kbd>Ctrl+E</kbd>                       | Save request
+<kbd>Ctrl+F</kbd>                       | Load request
 <kbd>Ctrl+C</kbd>                       | Quit
 <kbd>Ctrl+K</kbd>, <kbd>Shift+Tab</kbd> | Previous view
 <kbd>Ctlr+J</kbd>, <kbd>Tab</kbd>       | Next view
+<kbd>Ctlr+T</kbd>                       | Toggle context specific search
 <kbd>Alt+H</kbd>                        | Toggle history
 <kbd>Down</kbd>                         | Move down one view line
 <kbd>Up</kbd>                           | Move up one view line
@@ -51,14 +58,24 @@ Keybinding                              | Description
 <kbd>F7</kbd>                           | Jump to search
 <kbd>F8</kbd>                           | Jump to response headers
 <kbd>F9</kbd>                           | Jump to response body
+<kbd>F12</kbd>                          | Redirects Restriction Mode
+
+
+### Context specific search
+
+Wuzz accepts regular expressions by default to filter response body.
+Custom query syntax can be toggled by pressing <kbd>Ctrl+T</kbd>.
+The following formats have context specific search syntax:
+
+Response format  | Query syntax
+-----------------|----------------------------------------
+HTML             | https://github.com/PuerkitoBio/goquery
+JSON             | https://github.com/tidwall/gjson
 
 
 ## TODO
 
-* Colors
-* Response specific filters (xpath, etc..)
 * Better navigation
-* File upload
 * Autocompletion
 * Tests
 

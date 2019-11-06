@@ -35,6 +35,7 @@ type Config struct {
 }
 
 type GeneralOptions struct {
+	ContextSpecificSearch  bool
 	DefaultURLScheme       string
 	Editor                 string
 	FollowRedirects        bool
@@ -50,14 +51,17 @@ type GeneralOptions struct {
 var defaultTimeoutDuration, _ = time.ParseDuration("1m")
 
 var DefaultKeys = map[string]map[string]string{
-	"global": map[string]string{
+	"global": {
 		"CtrlR": "submit",
 		"CtrlC": "quit",
 		"CtrlS": "saveResponse",
+		"CtrlF": "loadRequest",
 		"CtrlE": "saveRequest",
 		"CtrlD": "deleteLine",
 		"CtrlW": "deleteWord",
 		"CtrlO": "openEditor",
+		"CtrlT": "toggleContextSpecificSearch",
+		"CtrlX": "clearHistory",
 		"Tab":   "nextView",
 		"CtrlJ": "nextView",
 		"CtrlK": "prevView",
@@ -70,23 +74,24 @@ var DefaultKeys = map[string]map[string]string{
 		"F7":    "focus search",
 		"F8":    "focus response-headers",
 		"F9":    "focus response-body",
+		"F12":   "redirects restriction mode",
 	},
-	"url": map[string]string{
+	"url": {
 		"Enter": "submit",
 	},
-	"response-headers": map[string]string{
+	"response-headers": {
 		"ArrowUp":   "scrollUp",
 		"ArrowDown": "scrollDown",
 		"PageUp":    "pageUp",
 		"PageDown":  "pageDown",
 	},
-	"response-body": map[string]string{
+	"response-body": {
 		"ArrowUp":   "scrollUp",
 		"ArrowDown": "scrollDown",
 		"PageUp":    "pageUp",
 		"PageDown":  "pageDown",
 	},
-	"help": map[string]string{
+	"help": {
 		"ArrowUp":   "scrollUp",
 		"ArrowDown": "scrollDown",
 		"PageUp":    "pageUp",
@@ -102,7 +107,7 @@ var DefaultConfig = Config{
 		FormatJSON:             true,
 		Insecure:               false,
 		PreserveScrollPosition: true,
-		StatusLine:             "[wuzz {{.Version}}]{{if .Duration}} [Response time: {{.Duration}}]{{end}}",
+		StatusLine:             "[wuzz {{.Version}}]{{if .Duration}} [Response time: {{.Duration}}]{{end}} [Request no.: {{.RequestNumber}}/{{.HistorySize}}] [Search type: {{.SearchType}}]{{if .DisableRedirect}} [Redirects Restricted Mode {{.DisableRedirect}}]{{end}}",
 		Timeout: Duration{
 			defaultTimeoutDuration,
 		},
